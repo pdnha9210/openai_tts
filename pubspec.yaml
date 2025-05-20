@@ -1,6 +1,6 @@
 name: openai_tts
-description: "A new Flutter package project."
-version: 0.0.1
+description: "A lightweight Flutter package that integrates with OpenAI's Text-to-Speech API"
+version: 0.0.2
 homepage: https://github.com/pdnha9210/openai_tts.git
 
 environment:

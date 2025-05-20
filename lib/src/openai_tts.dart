@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:http/http.dart' as http;
 import 'package:flutter_sound/flutter_sound.dart';
+import 'package:http/http.dart' as http;
 
+/// Enumeration of available OpenAI TTS voices.
 enum OpenaiTTSVoice {
   alloy,
   ash,
@@ -17,6 +19,7 @@ enum OpenaiTTSVoice {
   verse,
 }
 
+/// Enumeration of OpenAI TTS models.
 enum OpenaiTTSModel {
   tts1('tts-1'),
   tts1hd('tts-1-hd');
@@ -25,180 +28,233 @@ enum OpenaiTTSModel {
   final String value;
 }
 
-/// A client for OpenAI's text-to-speech API with support for both
-/// downloading audio and real-time streaming via PCM.
-///
-/// Requires a valid OpenAI API key and internet access.
-///
-/// Usage:
-/// ```dart
-/// final tts = OpenaiTTS(apiKey: 'sk-...');
-/// await tts.streamSpeak("Hello world!");
-/// final mp3Data = await tts.createSpeak("Download this.");
-/// ```
+/// Represents the current status of TTS playback.
+enum OpenaiTTSStatus {
+  fetching,
+  playing,
+  stopped,
+  completed,
+}
+
+/// A client for OpenAI's Text-to-Speech API.
+/// Supports both real-time PCM streaming playback and full MP3 playback.
 class OpenaiTTS {
-  OpenaiTTS({
-    required this.apiKey,
-  });
+  OpenaiTTS({required this.apiKey});
 
-  /// Your OpenAI API key (e.g. starts with `sk-` or `sk-proj-`).
   final String apiKey;
-
-  /// The voice to use for TTS output.
-  ///
-  /// Valid values include: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`.
-  OpenaiTTSVoice _voice = OpenaiTTSVoice.alloy;
-
-  /// The model to use. Options: `tts-1` or `tts-1-hd`.
-  OpenaiTTSModel _model = OpenaiTTSModel.tts1;
-
-  set setVoice(OpenaiTTSVoice voice) {
-    _voice = voice;
-  }
-
-  set setModel(OpenaiTTSModel model) {
-    _model = model;
-  }
 
   final FlutterSoundPlayer _player = FlutterSoundPlayer();
 
-  /// The buffer size for audio streaming.
+  // Configuration for PCM streaming
   final int _bufferSize = 2048;
-
-  /// The sample rate for audio streaming.
-  /// Defaults to 24000Hz for PCM audio.
   final int _sampleRate = 24000;
-
-  /// The number of channels for audio streaming.
-  /// Defaults to 1 (mono).
-  /// OpenAI TTS currently supports only mono audio.
   final int _numChannels = 1;
+  final Codec _pcmCodec = Codec.pcm16;
+  final Codec _mp3Codec = Codec.mp3;
 
-  /// Creates an instance of [OpenaiTTS].
-  ///
-  /// [apiKey] is required. Optional [voice] and [model] default to
-  /// `"shimmer"` and `"tts-1"` respectively.
+  bool _isCancelled = false;
 
-  /// Converts [text] to MP3 audio and returns it as a [Uint8List].
-  ///
-  /// This is a non-streaming method; the entire audio is generated
-  /// server-side and downloaded as a single binary blob.
-  ///
-  /// Can be saved as `.mp3` or played via an audio player package.
-  ///
-  /// Throws an [Exception] if the request fails.
-  Future<Uint8List> createSpeak(String text) async {
-    final response = await http.post(
-      Uri.parse('https://api.openai.com/v1/audio/speech'),
-      headers: {
-        'Authorization': 'Bearer $apiKey',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'model': _model.value,
-        'input': text,
-        'voice': _voice.toString(),
-        'response_format': 'mp3',
-      }),
-    );
+  // Buffers to temporarily store streamed audio data
+  final List<int> _pcmBuffer = [];
+  final List<int> _audioBuffer = [];
 
-    if (response.statusCode == 200) {
-      return response.bodyBytes;
-    } else {
-      throw Exception(
-        'TTS API Error ${response.statusCode}: ${response.body}',
-      );
-    }
-  }
+  Timer? _bufferPumpTimer;
 
-  /// Streams PCM audio from OpenAI TTS and plays it directly using [flutter_sound].
-  ///
-  /// The playback begins as soon as audio data starts arriving, allowing
-  /// for near real-time speech synthesis.
-  ///
-  /// This uses 16-bit PCM with 24000Hz sample rate and 1 channel (mono).
-  ///
-  /// Throws an [Exception] if the stream fails to load or decode.
-  Future<void> streamSpeak(String text) async {
+  // Stream to emit status updates (fetching, playing, stopped, etc.)
+  final _statusController = StreamController<OpenaiTTSStatus>.broadcast();
+  Stream<OpenaiTTSStatus> get ttsStatusStream => _statusController.stream;
+
+  Timer? _timer;
+
+  /// Streams and plays audio from OpenAI's TTS API using real-time PCM streaming.
+  Future<void> streamSpeak(
+    String text, {
+    OpenaiTTSVoice voice = OpenaiTTSVoice.alloy,
+    OpenaiTTSModel model = OpenaiTTSModel.tts1,
+    String? instructions,
+    void Function(Uint8List chunk)? onData,
+  }) async {
+    _isCancelled = false;
+    _pcmBuffer.clear();
+
     final url = Uri.parse("https://api.openai.com/v1/audio/speech");
+    final body = {
+      "model": model.value,
+      "input": text,
+      "voice": voice.name,
+      "response_format": "pcm", // PCM format for real-time playback
+    };
+    if (instructions != null) {
+      body["instructions"] = instructions;
+    }
 
+    // Build the HTTP POST request
     final request = http.Request("POST", url)
       ..headers.addAll({
         "Authorization": "Bearer $apiKey",
         "Content-Type": "application/json",
       })
-      ..body = jsonEncode({
-        "model": _model.value,
-        "input": text,
-        "voice": _voice.toString(),
-        "response_format": "pcm",
-      });
+      ..body = jsonEncode(body);
 
+    _statusController.add(OpenaiTTSStatus.fetching);
     final response = await request.send();
 
+    // Check for errors in the response
     if (response.statusCode != 200) {
       final error = await response.stream.bytesToString();
       throw Exception("TTS Stream Error ${response.statusCode}: $error");
     }
 
-    await _player.openPlayer();
-    await _player.setSubscriptionDuration(const Duration(milliseconds: 100));
+    // Open player if not already open
+    if (!_player.isOpen()) {
+      await _player.openPlayer();
+    }
 
+    // Start the player with a stream-based PCM source
     await _player.startPlayerFromStream(
-      codec: Codec.pcm16,
+      codec: _pcmCodec,
       sampleRate: _sampleRate,
       numChannels: _numChannels,
       interleaved: true,
       bufferSize: _bufferSize,
     );
 
-    final List<int> pcmBuffer = [];
+    _statusController.add(OpenaiTTSStatus.playing);
+    _startBufferPump(); // Start pushing PCM chunks from buffer
+
+    final DateTime startTime = DateTime.now();
+
     try {
+      // Stream audio data in chunks from the response
       await for (final chunk in response.stream) {
-        pcmBuffer.addAll(chunk);
-        while (pcmBuffer.length >= _bufferSize) {
-          _player.uint8ListSink!
-              .add(Uint8List.fromList(pcmBuffer.sublist(0, _bufferSize)));
-          pcmBuffer.removeRange(0, _bufferSize);
-        }
+        if (_isCancelled) break;
+
+        _audioBuffer.addAll(chunk);
+        _pcmBuffer.addAll(chunk);
+
+        // Optional callback for real-time chunk data
+        onData?.call(Uint8List.fromList(chunk));
       }
 
-      // Final flush
-      if (pcmBuffer.isNotEmpty) {
-        final remainder = pcmBuffer.length - (pcmBuffer.length % 2);
-        if (remainder > 0) {
-          _player.uint8ListSink!.add(Uint8List.fromList(
-            pcmBuffer.sublist(0, remainder),
-          ));
+      // After stream ends, flush remaining buffer
+      if (_pcmBuffer.isNotEmpty) {
+        final flushLen = _pcmBuffer.length - (_pcmBuffer.length % 2);
+        if (flushLen > 0) {
+          _player.uint8ListSink?.add(
+            Uint8List.fromList(_pcmBuffer.sublist(0, flushLen)),
+          );
         }
       }
     } catch (e) {
-      await _player.stopPlayer();
-      await _player.closePlayer();
+      // Handle unexpected errors during streaming playback
+      await stopPlayer();
       throw Exception("TTS Stream Playback Error: $e");
     } finally {
-      await _player.stopPlayer();
-      await _player.closePlayer();
+      _stopBufferPump();
+
+      // Estimate how much time remains and notify completion accordingly
+      final duration = _audioBuffer.length / (_sampleRate * _numChannels * 2);
+      final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+      final remainingMs =
+          ((duration * 1000).toInt() - elapsed).clamp(0, 1 << 31);
+      if (remainingMs > 0) {
+        _timer = Timer(Duration(milliseconds: remainingMs), () {
+          if (!_isCancelled) {
+            _statusController.add(OpenaiTTSStatus.completed);
+          }
+        });
+      } else {
+        _statusController.add(OpenaiTTSStatus.completed);
+      }
     }
   }
 
-  Future<void> stopPlayer() {
-    _player.closePlayer();
-    return _player.stopPlayer();
+  /// Downloads and plays a full MP3 file response from OpenAI's TTS API.
+  Future<void> createSpeak(
+    String text, {
+    OpenaiTTSVoice voice = OpenaiTTSVoice.alloy,
+    OpenaiTTSModel model = OpenaiTTSModel.tts1,
+    String? instructions,
+    void Function(Uint8List chunk)? onData,
+  }) async {
+    final url = Uri.parse("https://api.openai.com/v1/audio/speech");
+    final body = {
+      "model": model.value,
+      "input": text,
+      "voice": voice.name,
+      "response_format": "mp3", // Full MP3 file format
+    };
+    if (instructions != null) {
+      body["instructions"] = instructions;
+    }
+
+    final response = await http.post(
+      url,
+      headers: {
+        "Authorization": "Bearer $apiKey",
+        "Content-Type": "application/json",
+      },
+      body: jsonEncode(body),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception("TTS MP3 Error ${response.statusCode}: ${response.body}");
+    }
+
+    final audioBytes = response.bodyBytes;
+
+    onData?.call(audioBytes); // Optional callback with full MP3 data
+
+    await _playMp3(audioBytes);
   }
 
-  Future<void> pausePlayer() {
-    return _player.pausePlayer();
+  /// Plays back an MP3 file from memory.
+  Future<void> _playMp3(Uint8List data) async {
+    if (!_player.isOpen()) {
+      await _player.openPlayer();
+    }
+
+    await _player.startPlayer(
+      fromDataBuffer: data,
+      codec: _mp3Codec,
+    );
+
+    _statusController.add(OpenaiTTSStatus.playing);
   }
 
-  Future<void> resumePlayer() {
-    return _player.resumePlayer();
+  /// Stops playback and clears state.
+  Future<void> stopPlayer() async {
+    _statusController.add(OpenaiTTSStatus.stopped);
+    _isCancelled = true;
+    _pcmBuffer.clear();
+    _stopBufferPump();
+    await _player.stopPlayer();
+    await _player.closePlayer();
   }
 
-  /// Disposes the internal audio player.
-  ///
-  /// Call this when the instance is no longer needed to free up resources.
+  /// Starts a periodic timer to send buffered PCM chunks to the audio player.
+  void _startBufferPump() {
+    _bufferPumpTimer =
+        Timer.periodic(const Duration(milliseconds: 20), (timer) {
+      if (_pcmBuffer.length >= _bufferSize) {
+        final subChunk = Uint8List.fromList(_pcmBuffer.sublist(0, _bufferSize));
+        _player.uint8ListSink?.add(subChunk);
+        _pcmBuffer.removeRange(0, _bufferSize);
+      }
+    });
+  }
+
+  /// Stops the buffer pump timer.
+  void _stopBufferPump() {
+    _bufferPumpTimer?.cancel();
+    _bufferPumpTimer = null;
+  }
+
+  /// Disposes all resources and cancels timers.
   void dispose() {
     _player.closePlayer();
+    _statusController.close();
+    _timer?.cancel();
+    _stopBufferPump();
   }
 }

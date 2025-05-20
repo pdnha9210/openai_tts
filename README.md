@@ -1,37 +1,43 @@
 # openai_tts
 
-A lightweight Flutter package that integrates with OpenAI's Text-to-Speech API. Supports both real-time streaming (via PCM) and downloadable audio (MP3), powered by OpenAI's latest voice models.
+[![pub package](https://img.shields.io/pub/v/openai_tts.svg)](https://pub.dev/packages/openai_tts)
 
-> 🎙️ Generate lifelike speech with minimal latency and stream it directly in your app.
-
-## Features
-
-- 🔊 Text-to-speech using OpenAI’s `tts-1` and `tts-1-hd` models
-- 🎵 Supports both `mp3` and real-time `pcm` audio streaming
-- 🚀 Built-in streaming playback via `flutter_sound`
-- 🔁 Control over playback (pause, resume, stop)
-- 🎭 Supports multiple realistic voices
+A Flutter package for streaming and playing OpenAI Text-to-Speech (TTS) audio with real-time PCM playback or full MP3 playback support using `flutter_sound`.  
+Supports various voices and models from OpenAI's TTS API.
 
 ---
 
-## Installation
+## Features
 
-Add the following to your `pubspec.yaml`:
-
-```yaml
-dependencies:
-  openai_tts: ^<latest_version>
-```
-
-Then run:
-
-```sh
-flutter pub get
-```
+- Stream TTS audio directly from OpenAI API with low-latency PCM playback.
+- Download and play full MP3 audio response.
+- Multiple voices and models supported.
+- Playback status streaming to track progress.
+- Optional callbacks for real-time audio chunk handling.
+- Easy to use Flutter API built on top of `flutter_sound`.
 
 ---
 
 ## Getting Started
+
+### Installation
+
+Add this to your `pubspec.yaml`:
+
+```yaml
+dependencies:
+  openai_tts: ^1.0.0
+  flutter_sound: ^9.2.13 # Ensure compatibility with flutter_sound version you want
+  http: ^0.13.0
+```
+
+Run:
+
+```bash
+flutter pub get
+```
+
+### Usage
 
 Import the package:
 
@@ -39,89 +45,115 @@ Import the package:
 import 'package:openai_tts/openai_tts.dart';
 ```
 
-Create an instance:
+Initialize the TTS client:
 
 ```dart
-final tts = OpenaiTTS(apiKey: 'sk-...'); // Use your OpenAI API key
+final tts = OpenaiTTS(apiKey: 'YOUR_OPENAI_API_KEY');
 ```
 
-### 1. Download and use MP3:
+#### Stream and play TTS audio (PCM streaming):
 
 ```dart
-final audioData = await tts.createSpeak("Hello, world!");
-// Save or play using your preferred audio player
+await tts.streamSpeak(
+  "Hello from OpenAI TTS!",
+  voice: OpenaiTTSVoice.alloy,
+  model: OpenaiTTSModel.tts1,
+  onData: (chunk) {
+    // Optional: handle raw PCM chunk bytes for visualization or custom processing
+  },
+);
 ```
 
-### 2. Stream audio in real time:
+#### Download and play full MP3 audio:
 
 ```dart
-await tts.streamSpeak("Streaming this sentence in real-time.");
+await tts.createSpeak(
+  "Hello from OpenAI TTS!",
+  voice: OpenaiTTSVoice.nova,
+  model: OpenaiTTSModel.tts1hd,
+  onData: (bytes) {
+    // Optional: do something with full MP3 bytes (e.g. save to file)
+  },
+);
 ```
 
-### 3. Control playback:
+#### Listen to playback status changes:
 
 ```dart
-await tts.pausePlayer();
-await tts.resumePlayer();
+tts.ttsStatusStream.listen((status) {
+  switch (status) {
+    case OpenaiTTSStatus.fetching:
+      print('Fetching audio...');
+      break;
+    case OpenaiTTSStatus.playing:
+      print('Playing audio...');
+      break;
+    case OpenaiTTSStatus.stopped:
+      print('Playback stopped.');
+      break;
+    case OpenaiTTSStatus.completed:
+      print('Playback completed.');
+      break;
+  }
+});
+```
+
+#### Stop playback manually:
+
+```dart
 await tts.stopPlayer();
 ```
 
 ---
 
-## Configuration
+## API Reference
 
-### Change Voice:
+### Class: `OpenaiTTS`
 
-```dart
-tts.setVoice = OpenaiTTSVoice.shimmer;
-```
+- `OpenaiTTS({required String apiKey})`  
+  Creates a new TTS client with the given OpenAI API key.
 
-Available voices:
+- `Future<void> streamSpeak(String text, {OpenaiTTSVoice voice, OpenaiTTSModel model, String? instructions, void Function(Uint8List chunk)? onData})`  
+  Streams TTS audio using real-time PCM playback.
 
-- alloy
-- echo
-- fable
-- onyx
-- nova
-- shimmer
-- ash
-- ballad
-- coral
-- verse
-- sage
+- `Future<void> createSpeak(String text, {OpenaiTTSVoice voice, OpenaiTTSModel model, String? instructions, void Function(Uint8List chunk)? onData})`  
+  Downloads and plays full MP3 audio.
 
-### Change Model:
+- `Stream<OpenaiTTSStatus> get ttsStatusStream`  
+  Stream emitting playback status updates.
 
-```dart
-tts.setModel = OpenaiTTSModel.tts1hd;
-```
+- `Future<void> stopPlayer()`  
+  Stops current playback.
 
-Models:
+- `void dispose()`  
+  Releases resources.
 
-- `tts-1`
-- `tts-1-hd`
+### Enums
 
----
-
-## Requirements
-
-- Flutter 3.10 or newer
-- Valid OpenAI API key with TTS access
-- Internet connection
+- `OpenaiTTSVoice` — Available TTS voices like `alloy`, `nova`, `shimmer`, etc.
+- `OpenaiTTSModel` — Available models: `tts1`, `tts1hd`.
+- `OpenaiTTSStatus` — Playback states: `fetching`, `playing`, `stopped`, `completed`.
 
 ---
 
 ## Example
 
-Full example:
-
 ```dart
 void main() async {
-  final tts = OpenaiTTS(apiKey: 'sk-your-api-key');
-  tts.setVoice = OpenaiTTSVoice.nova;
-  tts.setModel = OpenaiTTSModel.tts1;
+  final tts = OpenaiTTS(apiKey: 'YOUR_OPENAI_API_KEY');
 
-  await tts.streamSpeak("Welcome to OpenAI TTS with Flutter.");
+  tts.ttsStatusStream.listen((status) {
+    print('Status: $status');
+  });
+
+  try {
+    await tts.streamSpeak(
+      "Hello, this is a streaming test!",
+      voice: OpenaiTTSVoice.onyx,
+    );
+  } catch (e) {
+    print('Error: $e');
+  }
 }
 ```
 
@@ -129,14 +161,13 @@ void main() async {
 
 ## Troubleshooting
 
-- Make sure your OpenAI API key is valid and has TTS access.
-- Streaming works best on physical devices with low audio latency.
-- Use the `createSpeak` method if you experience issues with real-time playback.
+- Ensure your OpenAI API key is valid and has TTS access.
+- This package depends on `flutter_sound` — check platform setup instructions for iOS/Android.
+- Network connectivity is required for streaming or downloading audio.
 
 ---
 
 ## License
 
-MIT License © 2025 [Your Name or Organization]
-
----
+Copyright 2025 © PdNha  
+[BDS 3 License](https://opensource.org/license/BSD-3-Clause)
