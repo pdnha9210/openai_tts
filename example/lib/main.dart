@@ -64,7 +64,7 @@ class _MyHomePageState extends State<MyHomePage> {
   Future<void> _speak() async {
     try {
       isFetched = false;
-      await openaiTTS.speak(textController.text);
+      await openaiTTS.streamSpeak(textController.text);
     } catch (e) {
       throw Exception('Error while speaking: $e');
     }
@@ -100,23 +100,19 @@ class _MyHomePageState extends State<MyHomePage> {
               children: [
                 ElevatedButton(
                   onPressed: () {
-                    _speak();
-                  },
-                  child: Text(
-                    isPlaying ? 'Pause' : 'Speak',
-                  ),
-                ),
-                const SizedBox(width: 20),
-                ElevatedButton(
-                  onPressed: () {
                     if (isPlaying) {
                       openaiTTS.stopPlayer();
+                      setState(() {
+                        isPlaying = false;
+                      });
+                    } else {
+                      _speak();
                     }
                   },
-                  child: const Text('Stop'),
+                  child: Text(isPlaying ? 'Stop' : 'Speak'),
                 ),
               ],
-            )
+            ),
           ],
         ),
       ),
